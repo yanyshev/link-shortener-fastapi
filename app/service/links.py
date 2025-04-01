@@ -12,6 +12,7 @@ from app.db import get_db
 from app.auth.user_manager import fastapi_users
 from app.models import User
 from app.service.src import generate_unique_short_code
+from app.service.redis_client import get_cache, set_cache
 
 links_router = APIRouter(tags=["create", "delete", "redirect", "update", "search", "set_expiration"])
 
@@ -85,6 +86,10 @@ def redirect_to_original(
     short_url: str,
     db: Session = Depends(get_db),
 ):
+    cached_url = get_cache(short_url)
+    if cached_url:
+        return RedirectResponse(cached_url)
+
     link = db.query(Link).filter_by(short_url=short_url).first()
 
     if not link:
@@ -97,6 +102,8 @@ def redirect_to_original(
     link.last_used_at = datetime.now()
     db.commit()
 
+    set_cache(short_url, link.long_url, ttl=3600)
+
     return RedirectResponse(link.long_url)
 
 
@@ -108,6 +115,11 @@ def search_links_by_original_url(
 ):
     cleaned_input = original_url.rstrip("/").lower()
 
+    cache_key = f"search:{cleaned_input}"
+    cached_results = get_cache(cache_key)
+    if cached_results:
+        return [LinkInfo(**link) for link in eval(cached_results)]  # Deserialize the cached results
+
     links = db.query(Link).filter(
         func.lower(Link.long_url).like(f"{cleaned_input}%")
     ).all()
@@ -116,6 +128,8 @@ def search_links_by_original_url(
         raise HTTPException(status_code=404, detail="No links found for this original URL")
 
     base_url = str(request.base_url).rstrip("/")
+
+    set_cache(cache_key, str([link.dict() for link in result]), ttl=3600)
 
     return [
         LinkInfo(
